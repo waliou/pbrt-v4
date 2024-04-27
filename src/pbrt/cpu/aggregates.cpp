@@ -1151,6 +1151,10 @@ bool KdTreeAggregate::IntersectP(const Ray &ray, Float raytMax) const {
 
 KdTreeAggregate *KdTreeAggregate::Create(std::vector<Primitive> prims,
                                          const ParameterDictionary &parameters) {
+    LOG_VERBOSE("KDTREE Creating!");
+    LOG_VERBOSE("KDTREE Creating!");
+    LOG_VERBOSE("KDTREE Creating!");
+
     int isectCost = parameters.GetOneInt("intersectcost", 5);
     int travCost = parameters.GetOneInt("traversalcost", 1);
     Float emptyBonus = parameters.GetOneFloat("emptybonus", 0.5f);
@@ -1160,6 +1164,22 @@ KdTreeAggregate *KdTreeAggregate::Create(std::vector<Primitive> prims,
                                maxPrims, maxDepth);
 }
 
+// GridAggregate
+
+pstd::optional<ShapeIntersection> GridAggregate::Intersect(const Ray &ray,
+                                                           Float tMax) const {
+    // TODO: Implement Intersect
+    pstd::optional<ShapeIntersection> si{};
+    Float rayTMax = tMax;
+    for (const auto &p : primitives) {
+        auto primSi = p.Intersect(ray, rayTMax);
+        if (primSi) {
+            rayTMax = primSi->tHit;
+            si = std::move(primSi);
+        }
+    }
+    return si;
+}
 Primitive CreateAccelerator(const std::string &name, std::vector<Primitive> prims,
                             const ParameterDictionary &parameters) {
     Primitive accel = nullptr;
@@ -1167,6 +1187,8 @@ Primitive CreateAccelerator(const std::string &name, std::vector<Primitive> prim
         accel = BVHAggregate::Create(std::move(prims), parameters);
     else if (name == "kdtree")
         accel = KdTreeAggregate::Create(std::move(prims), parameters);
+    else if (name == "grid")
+        accel = GridAggregate::Create(std::move(prims), parameters);
     else
         ErrorExit("%s: accelerator type unknown.", name);
 
