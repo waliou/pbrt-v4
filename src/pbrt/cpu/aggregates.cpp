@@ -1185,8 +1185,50 @@ struct GridVoxel {
         return si;
     }
 
+    bool IntersectP(const Ray &ray, Float tMax) const {
+        for (auto prim_id : prims_id) {
+            const auto &primitive = primitives[prim_id];
+            if (primitive.IntersectP(ray, tMax))
+                return true;
+        }
+        return false;
+    }
+
     std::vector<size_t> prims_id;
     std::vector<Primitive> &primitives;
+};
+
+struct DDA3D {
+    static DDA3D Init(const GridAggregate &grid, const Ray &ray, Float rayT) {
+        DDA3D dda;
+        auto gridIntersect = ray(rayT);
+        for (int axis = 0; axis < 3; ++axis) {
+            // Compute current voxel for axis
+            dda.Pos[axis] = grid.posToVoxel(gridIntersect, axis);
+            if (ray.d[axis] >= 0) {
+                // Handle ray with positive direction for voxel stepping
+                dda.NextCrossingT[axis] =
+                    rayT +
+                    (grid.voxelToPos(dda.Pos[axis] + 1, axis) - gridIntersect[axis]) /
+                        ray.d[axis];
+                dda.DeltaT[axis] = grid.width[axis] / ray.d[axis];
+                dda.Step[axis] = 1;
+                dda.Out[axis] = grid.nVoxel[axis];
+            } else {
+                // Handle ray with negative direction for voxel stepping
+                dda.NextCrossingT[axis] =
+                    rayT + (grid.voxelToPos(dda.Pos[axis], axis) - gridIntersect[axis]) /
+                               ray.d[axis];
+                dda.DeltaT[axis] = -grid.width[axis] / ray.d[axis];
+                dda.Step[axis] = -1;
+                dda.Out[axis] = -1;
+            }
+        }
+        return dda;
+    }
+
+    Float NextCrossingT[3], DeltaT[3];
+    int Step[3], Out[3], Pos[3];
 };
 
 GridAggregate::GridAggregate(std::vector<Primitive> prims, int nvoxel)
@@ -1208,37 +1250,16 @@ pstd::optional<ShapeIntersection> GridAggregate::Intersect(const Ray &ray,
     else if (!bounds.IntersectP(ray.o, ray.d, tMax, &rayT))
         return {};
 
-    auto gridIntersec = ray(rayT);
     // Set up 3D DDA for ray
-    Float NextCrossingT[3], DeltaT[3];
-    int Step[3], Out[3], Pos[3];
-    for (int axis = 0; axis < 3; ++axis) {
-        // Compute current voxel for axis
-        Pos[axis] = posToVoxel(gridIntersec, axis);
-        if (ray.d[axis] >= 0) {
-            // Handle ray with positive direction for voxel stepping
-            NextCrossingT[axis] =
-                rayT +
-                (voxelToPos(Pos[axis] + 1, axis) - gridIntersec[axis]) / ray.d[axis];
-            DeltaT[axis] = width[axis] / ray.d[axis];
-            Step[axis] = 1;
-            Out[axis] = nVoxel[axis];
-        } else {
-            // Handle ray with negative direction for voxel stepping
-            NextCrossingT[axis] =
-                rayT + (voxelToPos(Pos[axis], axis) - gridIntersec[axis]) / ray.d[axis];
-            DeltaT[axis] = -width[axis] / ray.d[axis];
-            Step[axis] = -1;
-            Out[axis] = -1;
-        }
-    }
+    auto dda = DDA3D::Init(*this, ray, rayT);
+
     // Walk ray through voxel grid
     pstd::optional<ShapeIntersection> si{};
     Float rayTMax = tMax;
     for (;;) {
         // Check for intersection in current voxel and advance to next
         // Voxel *voxel = voxels[offset(Pos[0], Pos[1], Pos[2])];
-        auto &voxel = voxels[Pos[0]][Pos[1]][Pos[2]];
+        auto &voxel = voxels[dda.Pos[0]][dda.Pos[1]][dda.Pos[2]];
 
         auto voxel_si = voxel.Intersect(ray, rayTMax);
         if (voxel_si) {
@@ -1248,24 +1269,57 @@ pstd::optional<ShapeIntersection> GridAggregate::Intersect(const Ray &ray,
         // Advance to next voxel
 
         // Find _stepAxis_ for stepping to next voxel
-        int bits = ((NextCrossingT[0] < NextCrossingT[1]) << 2) +
-                   ((NextCrossingT[0] < NextCrossingT[2]) << 1) +
-                   ((NextCrossingT[1] < NextCrossingT[2]));
+        int bits = ((dda.NextCrossingT[0] < dda.NextCrossingT[1]) << 2) +
+                   ((dda.NextCrossingT[0] < dda.NextCrossingT[2]) << 1) +
+                   ((dda.NextCrossingT[1] < dda.NextCrossingT[2]));
         constexpr int cmpToAxis[8] = {2, 1, 2, 1, 2, 2, 0, 0};
         int stepAxis = cmpToAxis[bits];
-        if (rayTMax < NextCrossingT[stepAxis])
+        if (rayTMax < dda.NextCrossingT[stepAxis])
             break;
-        Pos[stepAxis] += Step[stepAxis];
-        if (Pos[stepAxis] == Out[stepAxis])
+        dda.Pos[stepAxis] += dda.Step[stepAxis];
+        if (dda.Pos[stepAxis] == dda.Out[stepAxis])
             break;
-        NextCrossingT[stepAxis] += DeltaT[stepAxis];
+        dda.NextCrossingT[stepAxis] += dda.DeltaT[stepAxis];
     }
     return si;
 }
 
 bool GridAggregate::IntersectP(const Ray &ray, Float tMax) const {
-    auto si = Intersect(ray, tMax);
-    return si.has_value();
+    // Check ray against overall grid bounds
+    Float rayT;
+    if (Inside(ray.o, bounds))
+        rayT = ray.time;
+    else if (!bounds.IntersectP(ray.o, ray.d, tMax, &rayT))
+        return {};
+
+    // Set up 3D DDA for ray
+    auto dda = DDA3D::Init(*this, ray, rayT);
+
+    // Walk ray through voxel grid
+    Float rayTMax = tMax;
+    for (;;) {
+        // Check for intersection in current voxel and advance to next
+        // Voxel *voxel = voxels[offset(Pos[0], Pos[1], Pos[2])];
+        auto &voxel = voxels[dda.Pos[0]][dda.Pos[1]][dda.Pos[2]];
+
+        if (voxel.IntersectP(ray, rayTMax))
+            return true;
+        // Advance to next voxel
+
+        // Find _stepAxis_ for stepping to next voxel
+        int bits = ((dda.NextCrossingT[0] < dda.NextCrossingT[1]) << 2) +
+                   ((dda.NextCrossingT[0] < dda.NextCrossingT[2]) << 1) +
+                   ((dda.NextCrossingT[1] < dda.NextCrossingT[2]));
+        constexpr int cmpToAxis[8] = {2, 1, 2, 1, 2, 2, 0, 0};
+        int stepAxis = cmpToAxis[bits];
+        if (rayTMax < dda.NextCrossingT[stepAxis])
+            break;
+        dda.Pos[stepAxis] += dda.Step[stepAxis];
+        if (dda.Pos[stepAxis] == dda.Out[stepAxis])
+            break;
+        dda.NextCrossingT[stepAxis] += dda.DeltaT[stepAxis];
+    }
+    return false;
 }
 
 void GridAggregate::calculateBounds() {

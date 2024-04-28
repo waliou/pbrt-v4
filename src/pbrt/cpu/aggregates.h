@@ -105,6 +105,7 @@ class KdTreeAggregate {
 };
 
 struct GridVoxel;
+struct DDA3D;
 
 class GridAggregate {
   public:
@@ -120,6 +121,8 @@ class GridAggregate {
     Bounds3f Bounds() const { return bounds; }
 
     bool IntersectP(const Ray &ray, Float tMax) const;
+
+    friend struct DDA3D;
 
   private:
     // GridAggregate Private Methods
