@@ -1177,10 +1177,10 @@ struct GridVoxel {
         for (auto prim_id : prims_id) {
             const auto &primitive = primitives[prim_id];
             auto prim_si = primitive.Intersect(ray, rayTMax);
-            if (!prim_si)
-                continue;
-            rayTMax = prim_si->tHit;
-            si = std::move(prim_si);
+            if (prim_si) {
+                rayTMax = prim_si->tHit;
+                si = std::move(prim_si);
+            }
         }
         return si;
     }
@@ -1323,7 +1323,7 @@ bool GridAggregate::IntersectP(const Ray &ray, Float tMax) const {
 }
 
 void GridAggregate::calculateBounds() {
-    for (auto p : primitives)
+    for (const auto &p : primitives)
         bounds = Union(bounds, p.Bounds());
 }
 // calculate required information for voxels
