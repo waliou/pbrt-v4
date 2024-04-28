@@ -104,6 +104,65 @@ class KdTreeAggregate {
     Bounds3f bounds;
 };
 
+struct GridVoxel;
+struct DDA3D;
+
+class GridAggregate {
+  public:
+    using VoxelCoordinate = Vector3i;
+    // GridAggregate Public Methods
+    GridAggregate(std::vector<Primitive> prims, int nvoxel);
+
+    static GridAggregate *Create(std::vector<Primitive> prims,
+                                 const ParameterDictionary &parameters);
+
+    pstd::optional<ShapeIntersection> Intersect(const Ray &ray, Float tMax) const;
+
+    Bounds3f Bounds() const { return bounds; }
+
+    bool IntersectP(const Ray &ray, Float tMax) const;
+
+    friend struct DDA3D;
+
+  private:
+    // GridAggregate Private Methods
+    void calculateBounds();
+    // calculate required information for voxels
+    void getVoxelSetting(const Bounds3f &bound, int nvoxel);
+    // create Voxels for 3 dimension
+    void createVoxels();
+
+    void fillVoxelExtents(const Primitive &p, size_t prim_id);
+
+    VoxelCoordinate posToVoxel(const Point3f &p) {
+        VoxelCoordinate voxel_coordinate;
+        for (int axis = 0; axis < 3; ++axis)
+            voxel_coordinate[axis] = posToVoxel(p, axis);
+        return voxel_coordinate;
+    }
+
+    int posToVoxel(const Point3f &pos, int axis) const {
+        auto v_pos = pstd::floor((pos[axis] - bounds.pMin[axis]) * invWidth[axis]);
+        return Clamp(v_pos, 0, nVoxel[axis] - 1);
+    }
+
+    Float voxelToPos(int p, int axis) const {
+        return bounds.pMin[axis] + p * width[axis];
+    }
+
+    // GridAggregate Private Members
+    std::vector<Primitive> primitives;
+
+    std::vector<std::vector<std::vector<GridVoxel>>> voxels;
+
+    Vector3f delta;
+    Point3f nVoxel;
+    Point3f width, invWidth;
+
+    // bounds of all primitives
+    Bounds3f bounds;
+};
+
 }  // namespace pbrt
 
 #endif  // PBRT_CPU_AGGREGATES_H

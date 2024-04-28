@@ -1151,6 +1151,10 @@ bool KdTreeAggregate::IntersectP(const Ray &ray, Float raytMax) const {
 
 KdTreeAggregate *KdTreeAggregate::Create(std::vector<Primitive> prims,
                                          const ParameterDictionary &parameters) {
+    LOG_VERBOSE("KDTREE Creating!");
+    LOG_VERBOSE("KDTREE Creating!");
+    LOG_VERBOSE("KDTREE Creating!");
+
     int isectCost = parameters.GetOneInt("intersectcost", 5);
     int travCost = parameters.GetOneInt("traversalcost", 1);
     Float emptyBonus = parameters.GetOneFloat("emptybonus", 0.5f);
@@ -1160,6 +1164,206 @@ KdTreeAggregate *KdTreeAggregate::Create(std::vector<Primitive> prims,
                                maxPrims, maxDepth);
 }
 
+// GridAggregate
+
+struct GridVoxel {
+    GridVoxel(std::vector<Primitive> &prims) : primitives(prims) {}
+
+    void AddPrimitive(size_t prim_id) { prims_id.push_back(prim_id); }
+
+    pstd::optional<ShapeIntersection> Intersect(const Ray &ray, Float tMax) const {
+        pstd::optional<ShapeIntersection> si;
+        Float rayTMax = tMax;
+        for (auto prim_id : prims_id) {
+            const auto &primitive = primitives[prim_id];
+            auto prim_si = primitive.Intersect(ray, rayTMax);
+            if (prim_si) {
+                rayTMax = prim_si->tHit;
+                si = std::move(prim_si);
+            }
+        }
+        return si;
+    }
+
+    bool IntersectP(const Ray &ray, Float tMax) const {
+        for (auto prim_id : prims_id) {
+            const auto &primitive = primitives[prim_id];
+            if (primitive.IntersectP(ray, tMax))
+                return true;
+        }
+        return false;
+    }
+
+    std::vector<size_t> prims_id;
+    std::vector<Primitive> &primitives;
+};
+
+struct DDA3D {
+    static DDA3D Init(const GridAggregate &grid, const Ray &ray, Float rayT) {
+        DDA3D dda;
+        auto gridIntersect = ray(rayT);
+        for (int axis = 0; axis < 3; ++axis) {
+            // Compute current voxel for axis
+            dda.Pos[axis] = grid.posToVoxel(gridIntersect, axis);
+            if (ray.d[axis] >= 0) {
+                // Handle ray with positive direction for voxel stepping
+                dda.NextCrossingT[axis] =
+                    rayT +
+                    (grid.voxelToPos(dda.Pos[axis] + 1, axis) - gridIntersect[axis]) /
+                        ray.d[axis];
+                dda.DeltaT[axis] = grid.width[axis] / ray.d[axis];
+                dda.Step[axis] = 1;
+                dda.Out[axis] = grid.nVoxel[axis];
+            } else {
+                // Handle ray with negative direction for voxel stepping
+                dda.NextCrossingT[axis] =
+                    rayT + (grid.voxelToPos(dda.Pos[axis], axis) - gridIntersect[axis]) /
+                               ray.d[axis];
+                dda.DeltaT[axis] = -grid.width[axis] / ray.d[axis];
+                dda.Step[axis] = -1;
+                dda.Out[axis] = -1;
+            }
+        }
+        return dda;
+    }
+
+    Float NextCrossingT[3], DeltaT[3];
+    int Step[3], Out[3], Pos[3];
+};
+
+GridAggregate::GridAggregate(std::vector<Primitive> prims, int nvoxel)
+    : primitives(std::move(prims)) {
+    calculateBounds();
+    getVoxelSetting(bounds, nvoxel);
+    createVoxels();
+    size_t prim_id = 0;
+    for (const auto &prim : primitives)
+        fillVoxelExtents(prim, prim_id++);
+}
+
+pstd::optional<ShapeIntersection> GridAggregate::Intersect(const Ray &ray,
+                                                           Float tMax) const {
+    // Check ray against overall grid bounds
+    Float rayT;
+    if (Inside(ray.o, bounds))
+        rayT = ray.time;
+    else if (!bounds.IntersectP(ray.o, ray.d, tMax, &rayT))
+        return {};
+
+    // Set up 3D DDA for ray
+    auto dda = DDA3D::Init(*this, ray, rayT);
+
+    // Walk ray through voxel grid
+    pstd::optional<ShapeIntersection> si{};
+    Float rayTMax = tMax;
+    for (;;) {
+        // Check for intersection in current voxel and advance to next
+        // Voxel *voxel = voxels[offset(Pos[0], Pos[1], Pos[2])];
+        auto &voxel = voxels[dda.Pos[0]][dda.Pos[1]][dda.Pos[2]];
+
+        auto voxel_si = voxel.Intersect(ray, rayTMax);
+        if (voxel_si) {
+            rayTMax = voxel_si->tHit;
+            si = std::move(voxel_si);
+        }
+        // Advance to next voxel
+
+        // Find _stepAxis_ for stepping to next voxel
+        int bits = ((dda.NextCrossingT[0] < dda.NextCrossingT[1]) << 2) +
+                   ((dda.NextCrossingT[0] < dda.NextCrossingT[2]) << 1) +
+                   ((dda.NextCrossingT[1] < dda.NextCrossingT[2]));
+        constexpr int cmpToAxis[8] = {2, 1, 2, 1, 2, 2, 0, 0};
+        int stepAxis = cmpToAxis[bits];
+        if (rayTMax < dda.NextCrossingT[stepAxis])
+            break;
+        dda.Pos[stepAxis] += dda.Step[stepAxis];
+        if (dda.Pos[stepAxis] == dda.Out[stepAxis])
+            break;
+        dda.NextCrossingT[stepAxis] += dda.DeltaT[stepAxis];
+    }
+    return si;
+}
+
+bool GridAggregate::IntersectP(const Ray &ray, Float tMax) const {
+    // Check ray against overall grid bounds
+    Float rayT;
+    if (Inside(ray.o, bounds))
+        rayT = ray.time;
+    else if (!bounds.IntersectP(ray.o, ray.d, tMax, &rayT))
+        return {};
+
+    // Set up 3D DDA for ray
+    auto dda = DDA3D::Init(*this, ray, rayT);
+
+    // Walk ray through voxel grid
+    Float rayTMax = tMax;
+    for (;;) {
+        // Check for intersection in current voxel and advance to next
+        // Voxel *voxel = voxels[offset(Pos[0], Pos[1], Pos[2])];
+        auto &voxel = voxels[dda.Pos[0]][dda.Pos[1]][dda.Pos[2]];
+
+        if (voxel.IntersectP(ray, rayTMax))
+            return true;
+        // Advance to next voxel
+
+        // Find _stepAxis_ for stepping to next voxel
+        int bits = ((dda.NextCrossingT[0] < dda.NextCrossingT[1]) << 2) +
+                   ((dda.NextCrossingT[0] < dda.NextCrossingT[2]) << 1) +
+                   ((dda.NextCrossingT[1] < dda.NextCrossingT[2]));
+        constexpr int cmpToAxis[8] = {2, 1, 2, 1, 2, 2, 0, 0};
+        int stepAxis = cmpToAxis[bits];
+        if (rayTMax < dda.NextCrossingT[stepAxis])
+            break;
+        dda.Pos[stepAxis] += dda.Step[stepAxis];
+        if (dda.Pos[stepAxis] == dda.Out[stepAxis])
+            break;
+        dda.NextCrossingT[stepAxis] += dda.DeltaT[stepAxis];
+    }
+    return false;
+}
+
+void GridAggregate::calculateBounds() {
+    for (const auto &p : primitives)
+        bounds = Union(bounds, p.Bounds());
+}
+// calculate required information for voxels
+void GridAggregate::getVoxelSetting(const Bounds3f &bound, int nvoxel) {
+    delta = bounds.pMax - bounds.pMin;
+    for (int axis = 0; axis < 3; ++axis) {
+        nVoxel[axis] = nvoxel;
+        width[axis] = delta[axis] / nVoxel[axis];
+        invWidth[axis] = 1.f / width[axis];
+    }
+}
+// create Voxels for 3 dimension
+void GridAggregate::createVoxels() {
+    voxels.resize(nVoxel[0]);
+    for (auto &x_voxels : voxels) {
+        x_voxels.resize(nVoxel[1]);
+        for (auto &xy_voxels : x_voxels)
+            for (int i = 0; i < nVoxel[2]; ++i)
+                xy_voxels.emplace_back(primitives);
+    }
+    LOG_VERBOSE("Grid of %d X %d X %d created", nVoxel[0], nVoxel[1], nVoxel[2]);
+}
+
+void GridAggregate::fillVoxelExtents(const Primitive &p, size_t prim_id) {
+    auto primitive_bound = p.Bounds();
+    auto voxel_min = posToVoxel(primitive_bound.pMin),
+         voxel_max = posToVoxel(primitive_bound.pMax);
+    for (auto x = voxel_min.x; x <= voxel_max.x; ++x)
+        for (auto y = voxel_min.y; y <= voxel_max.y; ++y)
+            for (auto z = voxel_min.z; z <= voxel_max.z; ++z) {
+                voxels[x][y][z].AddPrimitive(prim_id);
+            }
+}
+
+GridAggregate *GridAggregate::Create(std::vector<Primitive> prims,
+                                     const ParameterDictionary &parameters) {
+    auto nvoxel = parameters.GetOneInt("nvoxel", 128);
+    return new GridAggregate(std::move(prims), nvoxel);
+}
+
 Primitive CreateAccelerator(const std::string &name, std::vector<Primitive> prims,
                             const ParameterDictionary &parameters) {
     Primitive accel = nullptr;
@@ -1167,6 +1371,8 @@ Primitive CreateAccelerator(const std::string &name, std::vector<Primitive> prim
         accel = BVHAggregate::Create(std::move(prims), parameters);
     else if (name == "kdtree")
         accel = KdTreeAggregate::Create(std::move(prims), parameters);
+    else if (name == "grid")
+        accel = GridAggregate::Create(std::move(prims), parameters);
     else
         ErrorExit("%s: accelerator type unknown.", name);
 
